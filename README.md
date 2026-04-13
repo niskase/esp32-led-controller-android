@@ -17,3 +17,6 @@
 
 ## Wiring
 ![Wiring](wiring.png)
+
+## Video
+[![Watch the video](https://img.youtube.com/vi/63OuyfznBkY/default.jpg)](https://www.youtube.com/watch?v=63OuyfznBkY)
