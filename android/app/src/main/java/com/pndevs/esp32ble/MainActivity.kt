@@ -40,6 +40,8 @@ import androidx.core.app.ActivityCompat
 import java.util.*
 import android.Manifest
 import android.widget.Toast
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 
 class MainActivity : ComponentActivity() {
 
@@ -53,9 +55,19 @@ class MainActivity : ComponentActivity() {
 
     // UI state
     private var connectionStatus = mutableStateOf("Not connected")
+    private var pinInput = mutableStateOf("")
+    private var isAuthorized = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Check for saved PIN code
+        val sharedPref = getSharedPreferences("ESP32_CONFIG", Context.MODE_PRIVATE)
+        val savedPin = sharedPref.getString("saved_pin", "")
+
+        if (!savedPin.isNullOrEmpty()) {
+            pinInput.value = savedPin
+        }
 
         // Ask for permissions
         checkAndRequestPermissions()
@@ -71,7 +83,9 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun BLEControlScreen() {
-        var status = remember { connectionStatus }
+        var status by remember { connectionStatus }
+        var pin by remember { pinInput }
+        var authorized by remember { isAuthorized }
 
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -79,34 +93,96 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.Center
         ) {
             Text(text = "Status: $status", style = MaterialTheme.typography.headlineSmall)
-
             Spacer(modifier = Modifier.height(32.dp))
 
-            Button(
-                onClick = { startBleScan() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Find and connect ESP32")
+            if (status != "Connected") {
+                // Find device
+                Button(onClick = { startBleScan() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Find and connect ESP32")
+                }
+            } else if (!authorized) {
+                // Ask PIN code
+                Text("Please enter PIN code:")
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = { if (it.length <= 6) pin = it },
+                    label = { Text("5-digit code") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { sendPin(pin) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("ACCEPT PIN")
+                }
+            } else {
+                // Control panel (when connected and PIN correct)
+                Text("Device control", style = MaterialTheme.typography.titleLarge)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("LED")
+                Row {
+                    Button(onClick = { sendCommand(1) }) { Text("ON")}
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { sendCommand(0) }) { Text("OFF")}
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("RELAY")
+                Row {
+                    Button(onClick = { sendCommand(3) }) { Text("ON")}
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { sendCommand(2) }) { Text("OFF")}
+                }
+                Text("BUZZER")
+                Row {
+                    Button(onClick = { sendCommand(5) }) { Text("ON")}
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { sendCommand(4) }) { Text("OFF")}
+                }
             }
+        }
+    }
 
-            Spacer(modifier = Modifier.height(16.dp))
+    // Send PIN
+    private fun sendPin(pin: String) {
+        val gatt = bluetoothGatt ?: return
+        val char = ledCharacteristic ?: return
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                Button(
-                    onClick = { sendCommand(1) },
-                    enabled = status.value == "Connected",
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Text("LED ON")
-                }
+        val paddedPin = if (pin.length < 6) pin.padEnd(6, ' ') else pin
+        val data = paddedPin.toByteArray(Charsets.UTF_8)
 
-                Button(
-                    onClick = { sendCommand(0) },
-                    enabled = status.value == "Connected",
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("LED OFF")
-                }
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+            writeToCharacteristic(gatt, char, data)
+            isAuthorized.value = true
+            savePin(pin);
+        }
+
+    }
+
+    // Save PIN
+    private fun savePin(pin: String) {
+        val sharedPref = getSharedPreferences("ESP32_CONFIG", Context.MODE_PRIVATE)
+        with (sharedPref.edit()) {
+            putString("saved_pin", pin)
+            apply()
+        }
+    }
+
+    // Clear saved PIN
+    private fun clearSavedPin() {
+        val sharedPref = getSharedPreferences("ESP32_CONFIG", Context.MODE_PRIVATE)
+        sharedPref.edit().remove("saved_pin").apply()
+        pinInput.value = ""
+        isAuthorized.value = false
+    }
+
+    private fun writeToCharacteristic(gatt: BluetoothGatt, char: BluetoothGattCharacteristic, data: ByteArray) {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            } else {
+                char.value = data
+                gatt.writeCharacteristic(char)
             }
         }
     }
@@ -178,26 +254,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendCommand(cmd: Int) {
-        val gatt = bluetoothGatt
-        val char = ledCharacteristic
-        if (gatt == null || char == null) {
-            showToast("Not connected to device")
-            return
-        }
-
+        val gatt = bluetoothGatt ?: return
+        val char = ledCharacteristic ?: return
         val data = byteArrayOf(cmd.toByte())
-
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-            } else {
-                @Suppress("DEPRECATION")
-                char.value = data
-                @Suppress("DEPRECATION")
-                gatt.writeCharacteristic(char)
-            }
-            Log.d("BLE", "Command sent: $cmd")
-        }
+        writeToCharacteristic(gatt, char, data)
     }
 
     // --- Permission handling ---

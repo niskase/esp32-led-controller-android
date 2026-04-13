@@ -1,34 +1,173 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <Preferences.h>
 
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// Settings
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
 
+const int BUZZER_PIN = 4;
+const int RELAY_PIN = 5;
+#define I2C_SDA 6 // I2C SDA PIN
+#define I2C_SCL 7 // I2C SCL PIN
 const int LED_PIN = 8; // ESP32-C3 built-in LED
 
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Preferences prefs;
+int secretPin;
+bool isAuthenticated = false;
+bool isLedOn = false;
+bool isRelayOn = false;
+bool isAlarmOn = false;
+unsigned long lastBeepTime = 0;
+bool buzzerState = false;
+
+// Connection icon
+void drawConnectionIcon() {
+  if (isAuthenticated) {
+    display.fillRect(118, 8, 2, 2, SSD1306_WHITE);
+    display.fillRect(121, 6, 2, 4, SSD1306_WHITE);
+    display.fillRect(124, 4, 2, 6, SSD1306_WHITE);
+  } else {
+    display.drawLine(118, 4, 126, 10, SSD1306_WHITE);
+    display.drawLine(126, 4, 118, 10, SSD1306_WHITE);
+  }
+}
+
+// Update screen
+void updateDisplay(String title, String msg, int textSize = 2) {
+  display.clearDisplay();
+  drawConnectionIcon();
+  controlPanel();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(title);
+  display.setTextSize(textSize);
+  display.setCursor(0, 15);
+  display.println(msg);
+  display.display();
+}
+
+// Server callbacks
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      Serial.println("Device connected");
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      Serial.println("Device disconnected");
+      isAuthenticated = false; 
+      pServer->getAdvertising()->start();
+      updateDisplay("Status", "Disconnected", 1);
+    }
+};
+
+void controlPanel() {
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 40);
+  isLedOn ? display.println("LED ON |") : display.println("LED OFF |");
+  display.setCursor(50, 40);
+  isRelayOn ? display.println("RELAY ON") : display.println("RELAY OFF");
+  display.setCursor(0, 50);
+  isAlarmOn ? display.println("ALARM ON") : display.println("ALARM OFF");
+}
+
+// Control panel callbacks
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String value = pCharacteristic->getValue();
-
-      if (value.length() > 0) {
-        if (value[0] == 0) {
-          digitalWrite(LED_PIN, HIGH);
-          Serial.println("LED OFF");
-        } else {
-          digitalWrite(LED_PIN, LOW);
-          Serial.println("LED ON");
+      if (value.length() >= 6) {
+        updateDisplay("Checking PIN-code...", value, 2);
+        delay(1000);
+        if (value.toInt() == secretPin) {
+          isAuthenticated = true;
+          updateDisplay("Checking PIN-code...", "OK!", 2);
+          delay(1000);
+          updateDisplay("Connected", "", 1);
+        }
+      } else if (isAuthenticated && value.length() == 1) {
+        uint8_t cmd = value[0];
+        if (cmd == 0) { digitalWrite(LED_PIN, HIGH); updateDisplay("LED", "OFF"); isLedOn = false; }
+        else if (cmd == 1) { digitalWrite(LED_PIN, LOW); updateDisplay("LED", "ON"); isLedOn = true; }
+        else if (cmd == 2) { digitalWrite(RELAY_PIN, LOW); updateDisplay("RELAY", "OFF"); isRelayOn = false; }
+        else if (cmd == 3) { digitalWrite(RELAY_PIN, HIGH); updateDisplay("RELAY", "ON"); isRelayOn = true; }
+        else if (cmd == 4) {
+          isAlarmOn = false; 
+          digitalWrite(BUZZER_PIN, LOW);
+          updateDisplay("ALARM", "OFF");
+        }
+        else if (cmd == 5) {
+          isAlarmOn = true; 
+          updateDisplay("ALARM", "ON");  
         }
       }
+      delay(1000);
+      updateDisplay("Connected", "", 1);
     }
 };
 
 void setup() {
+  
+  Serial.begin(115200);
+
+  // Define I2C pins and init 
+  Wire.begin(6, 7); 
+
+  // Init screen (0x3C is default)
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED init failed!"));
+    // If failed, blink blue LED
+    for(int i=0; i<5; i++) {
+      digitalWrite(LED_PIN, LOW); delay(100); digitalWrite(LED_PIN, HIGH); delay(100);
+    }
+  }
+
+  updateDisplay("Welcome", "Please wait...", 1);
+  delay(500);
+  
+  // Load secret PIN code
+  prefs.begin("secret", false);
+  secretPin = prefs.getInt("saved_pin", 0);
+
+  if (secretPin == 0) {
+    randomSeed(analogRead(0)); // Get some noise from ADC pin 
+    secretPin = random(10000, 99999);  
+    Serial.println("--- SECRET CODE GENERATED ---");
+    Serial.print("Code:");
+    Serial.println(secretPin);
+    Serial.println("----------------------------");
+    prefs.putInt("saved_pin", secretPin); // SAVE
+  } else {
+    Serial.print("Use saved code from memory: ");
+    Serial.println(secretPin);
+  }
+
+  prefs.end();
+
+  // Show PIN code on screen
+  updateDisplay("Connection code:", String(secretPin), 3);
+  
   pinMode(LED_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH); // When LED_PIN is high, LED is off
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+  
   BLEDevice::init("ESP32C3-LED-Control");
   
   BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
   BLECharacteristic *pCharacteristic = pService->createCharacteristic(
@@ -47,5 +186,22 @@ void setup() {
 }
 
 void loop() {
-  delay(2000);
+  if (isAlarmOn) {
+    unsigned long currentMillis = millis();
+
+    if (currentMillis - lastBeepTime >= 200) {
+      lastBeepTime = currentMillis;
+      buzzerState = !buzzerState;
+
+      if (buzzerState) {
+        digitalWrite(BUZZER_PIN, HIGH);
+      } else {
+        digitalWrite(BUZZER_PIN, LOW);
+      }
+    }
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  delay(10); 
 }
