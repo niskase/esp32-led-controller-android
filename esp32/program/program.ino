@@ -14,6 +14,7 @@
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 
+const int TILT_PIN = 3;
 const int BUZZER_PIN = 4;
 const int RELAY_PIN = 5;
 #define I2C_SDA 6 // I2C SDA PIN
@@ -27,8 +28,14 @@ bool isAuthenticated = false;
 bool isLedOn = false;
 bool isRelayOn = false;
 bool isAlarmOn = false;
+bool alarmTriggered = false;
+int lastTiltState;
 unsigned long lastBeepTime = 0;
 bool buzzerState = false;
+bool buzzerWasActive = false; 
+
+unsigned long motionDetectedTime = 0;
+bool waitingForConfirmation = false;
 
 // Connection icon
 void drawConnectionIcon() {
@@ -82,6 +89,20 @@ void controlPanel() {
   isAlarmOn ? display.println("ALARM ON") : display.println("ALARM OFF");
 }
 
+void playSuccessSound(String sound) {
+  if (sound == "alarmon") {
+    tone(BUZZER_PIN, 1000); delay(100);
+    tone(BUZZER_PIN, 1500); delay(100);
+    tone(BUZZER_PIN, 2000); delay(100);
+    noTone(BUZZER_PIN);  
+  } else if (sound == "alarmoff") {
+    tone(BUZZER_PIN, 2000); delay(100);
+    tone(BUZZER_PIN, 1500); delay(100);
+    tone(BUZZER_PIN, 1000); delay(100);
+    noTone(BUZZER_PIN);
+  }
+}
+
 // Control panel callbacks
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -102,12 +123,20 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         else if (cmd == 2) { digitalWrite(RELAY_PIN, LOW); updateDisplay("RELAY", "OFF"); isRelayOn = false; }
         else if (cmd == 3) { digitalWrite(RELAY_PIN, HIGH); updateDisplay("RELAY", "ON"); isRelayOn = true; }
         else if (cmd == 4) {
-          isAlarmOn = false; 
-          digitalWrite(BUZZER_PIN, LOW);
+          playSuccessSound("alarmoff");
           updateDisplay("ALARM", "OFF");
+          isAlarmOn = false; 
+          if (alarmTriggered) {
+            alarmTriggered = false;
+            lastTiltState = digitalRead(TILT_PIN);
+            updateDisplay("ALARM", "DISARMED");
+          }
+          
         }
         else if (cmd == 5) {
-          isAlarmOn = true; 
+          playSuccessSound("alarmon");
+          isAlarmOn = true;
+          lastTiltState = digitalRead(TILT_PIN);
           updateDisplay("ALARM", "ON");  
         }
       }
@@ -160,9 +189,11 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(TILT_PIN, INPUT_PULLUP);
   digitalWrite(LED_PIN, HIGH); // When LED_PIN is high, LED is off
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(BUZZER_PIN, LOW);
+  lastTiltState = digitalRead(TILT_PIN);
   
   BLEDevice::init("ESP32C3-LED-Control");
   
@@ -186,22 +217,47 @@ void setup() {
 }
 
 void loop() {
-  if (isAlarmOn) {
-    unsigned long currentMillis = millis();
 
-    if (currentMillis - lastBeepTime >= 200) {
-      lastBeepTime = currentMillis;
-      buzzerState = !buzzerState;
+  if (isAlarmOn && !alarmTriggered) {
+    int currentTiltState = digitalRead(TILT_PIN);
 
-      if (buzzerState) {
-        digitalWrite(BUZZER_PIN, HIGH);
+    if (currentTiltState != lastTiltState && !waitingForConfirmation) {
+      motionDetectedTime = millis();
+      waitingForConfirmation = true;
+    }
+    
+    if (waitingForConfirmation) {
+      if (digitalRead(TILT_PIN) != lastTiltState) {
+        if (millis() - motionDetectedTime > 150) {
+          alarmTriggered = true;
+          updateDisplay("ALARM!", "Motion detected", 1);
+          waitingForConfirmation = false;
+        }
       } else {
-        digitalWrite(BUZZER_PIN, LOW);
+        waitingForConfirmation = false;
       }
     }
-  } else {
-    digitalWrite(BUZZER_PIN, LOW);
   }
 
-  delay(10); 
+  if (isAlarmOn && alarmTriggered) {
+    unsigned long currentMillis = millis();
+
+    buzzerWasActive = true;
+    
+    if ((currentMillis / 300) % 2 == 0) {
+      tone(BUZZER_PIN, 3000);
+      digitalWrite(RELAY_PIN, LOW);
+    } else {
+      tone(BUZZER_PIN, 2000);
+      digitalWrite(RELAY_PIN, HIGH);
+    }
+  } else {
+    if (buzzerWasActive) {
+      noTone(BUZZER_PIN);
+      buzzerWasActive = false;
+    }
+    
+  }
+
+  delay(10);
 }
